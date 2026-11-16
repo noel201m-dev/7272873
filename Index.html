@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SnapScore Pusher</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0d0d0d;
+      color: #f0f0f0;
+      font-family: 'Segoe UI', sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      gap: 16px;
+      padding: 24px;
+    }
+    h1 { color: #FFFC00; font-size: 1.6rem; letter-spacing: 1px; }
+    .card {
+      background: #1a1a1a;
+      border: 1px solid #2e2e2e;
+      border-radius: 12px;
+      padding: 24px;
+      width: 100%;
+      max-width: 480px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    label { font-size: 0.8rem; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
+    input, textarea {
+      background: #111;
+      border: 1px solid #333;
+      border-radius: 8px;
+      color: #f0f0f0;
+      padding: 10px 12px;
+      font-size: 0.95rem;
+      width: 100%;
+      resize: vertical;
+    }
+    input:focus, textarea:focus { outline: none; border-color: #FFFC00; }
+    .row { display: flex; gap: 10px; }
+    .row input { flex: 1; }
+    button {
+      background: #FFFC00;
+      color: #000;
+      border: none;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 1rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    button:hover { opacity: 0.85; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #stopBtn {
+      background: #ff4444;
+      color: #fff;
+      display: none;
+    }
+    #log {
+      background: #111;
+      border: 1px solid #222;
+      border-radius: 8px;
+      padding: 12px;
+      height: 180px;
+      overflow-y: auto;
+      font-size: 0.82rem;
+      font-family: monospace;
+      color: #aaa;
+    }
+    .log-ok  { color: #4cff91; }
+    .log-err { color: #ff5555; }
+    .log-inf { color: #FFFC00; }
+    #counter {
+      text-align: center;
+      font-size: 2rem;
+      font-weight: 700;
+      color: #FFFC00;
+    }
+    #counter span { font-size: 0.8rem; color: #666; display: block; }
+  </style>
+</head>
+<body>
+
+<h1>⚡ SnapScore Pusher</h1>
+
+<div class="card">
+  <label>Proxy URL (required — see notes)</label>
+  <input id="proxyUrl" type="text" placeholder="http://localhost:8080/proxy" value="http://localhost:8080/proxy">
+
+  <label>Snapchat Auth Token (Bearer)</label>
+  <input id="authToken" type="text" placeholder="Bearer eyJ...">
+
+  <label>Cookies (aus DevTools kopieren)</label>
+  <textarea id="cookies" rows="3" placeholder="sc-a2=...; sc-b=...; xsrf-token=..."></textarea>
+
+  <label>XSRF Token</label>
+  <input id="xsrfToken" type="text" placeholder="aus DevTools → Request Headers">
+
+  <label>Ziel-Username</label>
+  <input id="targetUser" type="text" placeholder="snapchat_username">
+
+  <div class="row">
+    <div style="flex:1">
+      <label>Snaps pro Burst</label>
+      <input id="burstCount" type="number" value="5" min="1" max="20">
+    </div>
+    <div style="flex:1">
+      <label>Delay (ms)</label>
+      <input id="delayMs" type="number" value="2500" min="500" max="30000">
+    </div>
+  </div>
+
+  <div class="row">
+    <button id="startBtn" onclick="startPusher()">▶ Start</button>
+    <button id="stopBtn" onclick="stopPusher()">■ Stop</button>
+  </div>
+</div>
+
+<div class="card">
+  <div id="counter">0 <span>snaps gesendet</span></div>
+  <div id="log"></div>
+</div>
+
+<script>
+  let running = false;
+  let totalSent = 0;
+
+  // Minimal 1x1 red pixel JPEG as snap media payload (base64)
+  // Snapchat accepts any valid image — this is the smallest valid one
+  const DUMMY_JPEG_B64 =
+    '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkS' +
+    'Ew8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJ' +
+    'CQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIy' +
+    'MjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFgABAQEAAAAAAAAAAAAAAAAA' +
+    'AAMCBP/EABsQAAIDAQEBAAAAAAAAAAAAAAECAxESIf/EABQBAQAAAAAAAAAAAAAAAAAA' +
+    'AAD/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwDJ5gLHWP/Z';
+
+  function b64toBlob(b64, type='image/jpeg') {
+    const bin = atob(b64);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return new Blob([arr], { type });
+  }
+
+  function log(msg, cls='log-inf') {
+    const el = document.getElementById('log');
+    const line = document.createElement('div');
+    line.className = cls;
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function buildSnapPayload(targetUser) {
+    // Snapchat's /loq/send_message multipart form structure
+    // Reverse-engineered from network traffic — fields vary by client version
+    const fd = new FormData();
+    fd.append('recipient_usernames', JSON.stringify([targetUser]));
+    fd.append('media_id',            crypto.randomUUID().replace(/-/g,'').toUpperCase());
+    fd.append('type',                '0');           // 0 = photo snap
+    fd.append('zipped',              '0');
+    fd.append('camera_front_facing', '1');
+    fd.append('snap_duration_secs',  '1');           // 1s = fastest open/close
+    fd.append('captured_at',         Date.now().toString());
+    fd.append('media',               b64toBlob(DUMMY_JPEG_B64), 'snap.jpg');
+    return fd;
+  }
+
+  async function sendSnap(proxyUrl, authToken, cookies, xsrfToken, targetUser) {
+    // All requests route through your local proxy to avoid CORS + add server-side headers
+    const resp = await fetch(proxyUrl, {
+      method: 'POST',
+      headers: {
+        'X-Target-URL':   'https://app.snapchat.com/loq/send_message',
+        'X-Auth-Token':   authToken,
+        'X-Cookies':      cookies,
+        'X-XSRF-Token':   xsrfToken,
+        // proxy strips X- headers, re-attaches them as real headers on the upstream call
+      },
+      body: buildSnapPayload(targetUser),
+    });
+
+    if (!resp.ok) {
+      const txt = await resp.text().catch(()=>'');
+      throw new Error(`HTTP ${resp.status} — ${txt.slice(0,120)}`);
+    }
+    return await resp.json().catch(() => ({}));
+  }
+
+  async function startPusher() {
+    const proxyUrl   = document.getElementById('proxyUrl').value.trim();
+    const authToken  = document.getElementById('authToken').value.trim();
+    const cookies    = document.getElementById('cookies').value.trim();
+    const xsrfToken  = document.getElementById('xsrfToken').value.trim();
+    const targetUser = document.getElementById('targetUser').value.trim();
+    const burst      = parseInt(document.getElementById('burstCount').value) || 5;
+    const delay      = parseInt(document.getElementById('delayMs').value)    || 2500;
+
+    if (!authToken || !targetUser || !xsrfToken) {
+      log('⚠ Token, XSRF oder Username fehlt.', 'log-err');
+      return;
+    }
+
+    running = true;
+    document.getElementById('startBtn').disabled = true;
+    document.getElementById('stopBtn').style.display = 'block';
+    log(`Pusher gestartet → ${targetUser} | burst=${burst} delay=${delay}ms`, 'log-inf');
+
+    while (running) {
+      for (let i = 0; i < burst && running; i++) {
+        try {
+          await sendSnap(proxyUrl, authToken, cookies, xsrfToken, targetUser);
+          totalSent++;
+          document.getElementById('counter').childNodes[0].textContent = totalSent;
+          log(`snap #${totalSent} gesendet ✓`, 'log-ok');
+        } catch (err) {
+          log(`fehler: ${err.message}`, 'log-err');
+          // rate-limit hit likely — back off hard
+          if (err.message.includes('429') || err.message.includes('401')) {
+            log('rate limit / auth — pause 15s', 'log-err');
+            await sleep(15000);
+          }
+        }
+        await sleep(delay);
+      }
+    }
+  }
+
+  function stopPusher() {
+    running = false;
+    document.getElementById('startBtn').disabled = false;
+    document.getElementById('stopBtn').style.display = 'none';
+    log('gestoppt.', 'log-inf');
+  }
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+</script>
+
+</body>
+</html>
